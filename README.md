@@ -18,8 +18,8 @@
     - [Request Response](#Request-Response)
     - [Circuit Breaker](#Circuit-Breaker)
   - [운영](#운영)
-    - [Gateway](#Gateway)
-    - [Deploy](#Deploy)
+    - [Gateway Ingress](#Gateway-Ingress)
+    - [Deploy Pipeline](#Deploy-Pipeline)
     - [Autoscale](#Autoscale)
     - [Readiness Probe ](#Readiness-Probe )
     - [PV ConfigMap Secret ](#PV-ConfigMap-Secret)
@@ -211,11 +211,6 @@ public class PolicyHandler{
 ...
 ```
 
-![image](https://user-images.githubusercontent.com/117132766/210037385-316b7b68-17f1-4205-a00c-926dd8c63406.png)
-
-![image](https://user-images.githubusercontent.com/117132766/210037914-3d864687-9f9b-4ec4-aa90-f00ef6c2c4c3.png)
-
-
 ## CQRS
 - dashboard ReadModel의 데이터 입력/수정/삭제와 조회를 분리한다.
 - 예시로 reservation의 ReservationRegistered 이벤트 발생 시 reservation.id, status를 dashboard.reservId, reservStatus에 반영한다.
@@ -252,6 +247,13 @@ public class PolicyHandler{
 - 위 이벤트 발생에 따라 dashboard 레코드 생성
 
 ![image](https://user-images.githubusercontent.com/117132766/210033018-4c51f155-5582-4f66-9c72-1a3c49bc6f46.png)
+
+
+## Request Response
+- Payment에 delay 발생 코드를 작성하여 부하 발생에 따른 요청 실패를 구현한다.
+![image](https://user-images.githubusercontent.com/31139303/210036983-d922a0b4-e91d-4d94-a1a1-25999628d6b6.png)
+
+
 
 
 ## Circuit Breaker
@@ -305,34 +307,57 @@ public class PolicyHandler{
 # 운영
 
 ## Gateway Ingress
+1. application.yml 파일 내에 profiles 별 routes를 추가.
+   gateway 서버의 포트는 8080.
 
-## Deploy Pipeline
-
-## Autoscale
-앞서 CB 는 시스템을 안정되게 운영할 수 있게 해줬지만 사용자의 요청을 100% 받아들여주지 못했기 때문에 이에 대한 보완책으로 자동화된 확장 기능을 적용하고자 한다.
-
-- Reservation deployment.yml 파일에 resources 설정을 추가한다.
-
-![image](https://user-images.githubusercontent.com/98464146/210037454-6ba83845-3b51-48a0-8d1a-e40d1c23662b.png)
-
-- 결제서비스에 대한 replica 를 동적으로 늘려주도록 HPA 를 설정한다. 설정은 CPU 사용량이 15프로를 넘어서면 replica 를 10개까지 늘려준다:
-
+- application.yml
 ```
-kubectl autoscale deploy reservation --min=1 --max=10 --cpu-percent=15
-```
+spring:
+  profiles: docker
+  cloud:
+    gateway:
+      routes:
+        - id: reservation
+          uri: http://reservation:8080
+          predicates:
+            - Path=/reservations/**, 
+        - id: payment
+          uri: http://payment:8080
+          predicates:
+            - Path=/payments/**, 
+        - id: review
+          uri: http://review:8080
+          predicates:
+            - Path=/reviews/**, 
+        - id: dashboard
+          uri: http://dashboard:8080
+          predicates:
+            - Path=, /dashboards/**
+        - id: schedule
+          uri: http://schedule:8080
+          predicates:
+            - Path=/schedules/**, 
+        - id: frontend
+          uri: http://frontend:8080
+          predicates:
+            - Path=/**
+      globalcors:
+        corsConfigurations:
+          '[/**]':
+            allowedOrigins:
+              - "*"
+            allowedMethods:
+              - "*"
+            allowedHeaders:
+              - "*"
+            allowCredentials: true
 
-- CB 에서 했던 방식대로 워크로드를 2분 동안 걸어준다.
-  동시 사용자 100명, 2분 동안 실시
+server:
+  port: 8080
 
-```
-siege -c100 -t120S --content-type "application/json" 'http://reservation:8080 POST {"status": "created"}'
-```
+```   
 
- ![image](https://user-images.githubusercontent.com/117131347/209915789-8005b700-cb18-45a2-afc5-0765afb42052.png) 
-
-## Deploy
-
-- Kubernetes에 Deploy 생성.
+2. Kubernetes에 Deploy 생성.
 
 - deployment.yml
 ``` 
@@ -358,32 +383,124 @@ spec:
           ports:
             - containerPort: 8080
 ```             
-
 - Kubernetes에 생성된 Deploy 확인
+![image](https://user-images.githubusercontent.com/117131347/209910844-100d2aa6-a108-4a91-a12a-0f08a9bf12a2.png)
 
-![image](https://user-images.githubusercontent.com/117131347/210037419-5687b526-28e6-4029-a5cb-e2919e6d188b.png)
-=======
-
-- 오토스케일이 어떻게 되고 있는지 모니터링을 걸어둔다
-
+3. Service 
+  Kubernestes용 service.yaml 작성한 후 gateway 엔드포인트 확인.
+- service.yaml 
+```
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway
+  labels:
+    app: gateway
+spec:
+  ports:
+    - port: 8080
+      targetPort: 8080
+  selector:
+    app: gateway
+  type: LoadBalancer
 
 ```
-kubectl get deploy reservation -w
-```
+ ![image](https://user-images.githubusercontent.com/117131347/209915789-8005b700-cb18-45a2-afc5-0765afb42052.png) 
 
-- 어느정도 시간이 흐른 후 (약 30초) 스케일 아웃이 벌어지는 것을 확인할 수 있다.
+## Deploy Pipeline
 
-![image](https://user-images.githubusercontent.com/98464146/210038195-63191b70-fb23-4c6f-b00d-c6047d4f7ce9.png)
-
-- siege 의 로그를 보아도 전체적인 성공률이 높아진 것을 확인 할 수 있다.
-
-![image](https://user-images.githubusercontent.com/98464146/210038303-cc363234-0e48-4354-ab61-e8733fe5f248.png)
-
+## Autoscale
 
 ## Readiness Probe 
 
-## PV ConfigMap Secre
+## PV
+1. EFS 생성 및 security group 설정
+
+![image](https://user-images.githubusercontent.com/118946107/210037486-c0d0fce5-baef-49ed-ba6b-2128106daa63.png)
+
+![image](https://user-images.githubusercontent.com/118946107/210037432-0a578899-32e9-4a29-954a-bf7ce548a5e5.png)
+
+2. EFS 계정 생성 및 ROLE 바인딩
+
+![image](https://user-images.githubusercontent.com/118946107/210037787-979f17db-a00f-42a4-8d01-ddbf21d2f69d.png)
+
+3. EFS Provisioner 배포 / 설치한 Provisioner를 storageclass에 등록
+
+![image](https://user-images.githubusercontent.com/118946107/210037858-b84a1eaa-0cd8-47c0-bb90-d740627b116a.png)
+
+4. PVC(PersistentVolumeClaim) 생성
+
+![image](https://user-images.githubusercontent.com/118946107/210037921-bd5d0c0d-6a1e-4b8f-95c8-ad3c81b712fc.png)
+
+5. NFS 볼륨을 가지는 마이크로서비스 배포
+
+![image](https://user-images.githubusercontent.com/118946107/210038021-aa205827-add6-49f5-9c01-85ca5f363ea7.png)
+
+6. pod에서 마운트된 경로에 파일 생성 및 확인
+
+![image](https://user-images.githubusercontent.com/118946107/210038228-f8d87efc-b2af-40d3-97ca-e0eb4357157c.png)
+
 
 ## Liveness Probe
 
-## Loggregation Monitoring
+## Loggregation
+1. ElasticSearch 설치
+
+- helm repo add elastic https://helm.elastic.co
+
+- helm repo update
+
+- helm show values elastic/elasticsearch > es-value.yml
+
+- vi es-value.yml
+
+![image](https://user-images.githubusercontent.com/118946107/210038687-8b0f8b45-6347-4527-a472-1bd63ac9ef23.png)
+
+![image](https://user-images.githubusercontent.com/118946107/210038717-7a74394c-f651-41e8-a35f-166cfc43cbd2.png)
+
+- kubectl create namespace loggin
+
+- helm install elastic elastic/elasticsearch -f es-value.yml -n logging
+
+- kubectl get all -n logging
+
+![image](https://user-images.githubusercontent.com/118946107/210038776-0936ac21-bccc-4d6e-9af1-410637278ad6.png)
+
+2. FluentBit 설치
+- git clone https://github.com/fluent/fluent-bit-kubernetes-logging.git
+
+- cd fluent-bit-kubernetes-logging/
+
+- kubectl create -f fluent-bit-service-account.yaml -n logging
+
+- kubectl create -f fluent-bit-role-1.22.yaml -n logging
+
+- kubectl create -f fluent-bit-role-binding-1.22.yaml -n logging
+
+- vi fluent-bit-ds.yaml
+
+![image](https://user-images.githubusercontent.com/118946107/210038902-a1ba5f7c-1bb3-4521-9749-e845ec43e6a6.png)
+
+- vi fluent-bit-configmap.yaml
+
+![image](https://user-images.githubusercontent.com/118946107/210038939-ce34b1e2-6b0b-4756-9f07-18baa94f220c.png)
+
+- kubectl apply -f fluent-bit-configmap.yaml -n logging
+
+- kubectl apply -f fluent-bit-ds.yaml -n logging
+ 
+3. Kibana 설치
+- helm show values elastic/kibana > kibana-value.yml
+
+- vi kibana-value.yml
+
+![image](https://user-images.githubusercontent.com/118946107/210039088-3242a4a7-4ca9-41a0-8ce5-6e971bab0330.png)
+
+![image](https://user-images.githubusercontent.com/118946107/210039157-7ec53a0f-928a-4645-bc29-be01df459764.png)
+
+- helm install kibana elastic/kibana -f kibana-value.yml -n logging
+
+4. Kibana를 통한 로깅 확인
+
+![image](https://user-images.githubusercontent.com/118946107/210039218-db85704d-bea5-4704-87d1-b48c1fc72571.png)
+
